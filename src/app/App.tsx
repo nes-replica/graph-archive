@@ -1,11 +1,12 @@
 import React, {FC, Reducer, useEffect, useReducer, useState} from 'react';
 import './App.css';
 import ReactFlow, {
+  addEdge,
   applyEdgeChanges,
-  applyNodeChanges,
-  Controls, Edge, EdgeChange,
+  applyNodeChanges, Connection,
+  Controls, Edge, EdgeChange, Handle,
   MiniMap,
-  Node, NodeChange, NodeProps,
+  Node, NodeChange, NodeProps, Position, updateEdge,
 } from "react-flow-renderer";
 import {Markdown, MDEditor} from "../core/editor/MDEditor";
 import {MDStub} from "./MDStub";
@@ -26,15 +27,15 @@ interface EditorState {
   content: string
 }
 
-interface HotKeysState {
-  keysPressed: string[]
+interface EdgeUpdateState {
+  isSuccessful: boolean
 }
 
 interface ReducerState {
   nodes: Node<NodeData>[]
   edges: Edge<EdgeData>[]
   editor?: EditorState
-  hotKeys: HotKeysState
+  edgeUpdate?: EdgeUpdateState
 }
 
 interface EditAction {
@@ -59,19 +60,44 @@ interface EdgeChangeAction {
   changes: EdgeChange[]
 }
 
-interface KeyPressedAction {
-  type: 'keyPressed'
-  value: string
+interface EdgeAddAction {
+  type: 'edgeAdd'
+  connection: Connection
 }
 
-interface KeyReleasedAction {
-  type: 'keyReleased'
-  value: string
+interface EdgeUpdateStartAction {
+  type: 'edgeUpdateStart'
 }
 
-type ReducerAction = EditAction | ContentChangeAction | NodeChangeAction | EdgeChangeAction | KeyPressedAction | KeyReleasedAction
+interface EdgeUpdateEndAction {
+  type: 'edgeUpdateEnd'
+  edge: Edge<EdgeData>
+}
+
+interface EdgeUpdateAction {
+  type: 'edgeUpdate'
+  oldEdge: Edge<EdgeData>
+  newConnection: Connection
+}
+
+type ReducerAction = EditAction | ContentChangeAction | NodeChangeAction | EdgeChangeAction | EdgeAddAction | EdgeUpdateStartAction | EdgeUpdateAction | EdgeUpdateEndAction
 
 const graphReducer: Reducer<ReducerState, ReducerAction> = (state: ReducerState, action: ReducerAction): ReducerState => {
+  if (action.type === 'edgeUpdateStart') {
+    return {...state, edgeUpdate: { isSuccessful: false }}
+  }
+  if (action.type === 'edgeUpdateEnd') {
+    if (!state.edgeUpdate?.isSuccessful) {
+      const updatedEdges = state.edges.slice().filter(e => e.id !== action.edge.id)
+      return {...state, edges: updatedEdges, edgeUpdate: {isSuccessful: true}}
+    } else {
+      return state
+    }
+  }
+  if (action.type === "edgeUpdate") {
+    const updatedEdges = updateEdge(action.oldEdge, action.newConnection, state.edges)
+    return {...state, edges: updatedEdges, edgeUpdate: {isSuccessful: true}}
+  }
   if (action.type === 'edit') {
     if (action.isEditing) {
       const node = state.nodes.find(node => node.id === action.id)
@@ -93,33 +119,24 @@ const graphReducer: Reducer<ReducerState, ReducerAction> = (state: ReducerState,
         return state
       }
     }
-  } else if (action.type === 'contentChange') {
+  }
+  if (action.type === 'contentChange') {
     if (state.editor) {
       return { ...state, editor: {...state.editor, content: action.content}}
     } else {
       return state
     }
-  } else if (action.type === 'nodeChange') {
+  }
+  if (action.type === 'nodeChange') {
     const updatedNodes = applyNodeChanges(action.changes, state.nodes)
     return {...state, nodes: updatedNodes}
-  } else if (action.type === 'edgeChange') {
+  }
+  if (action.type === 'edgeChange') {
     const updatedEdges = applyEdgeChanges(action.changes, state.edges)
     return {...state, edges: updatedEdges}
-  } else if (action.type === 'keyPressed') {
-    const updatedHotKeys = state.hotKeys.keysPressed.slice()
-    updatedHotKeys.push(action.value)
-    console.log(updatedHotKeys)
-    if (eqSet(new Set(updatedHotKeys), new Set(['Alt', 'n']))) {
-      const onEdit = (id: string) => () => graphReducer(state, {type: 'edit', id, isEditing: true})
-      const updatedNodes = applyNodeChanges([{type: 'add', item: createNode((onEdit))}], state.nodes)
-      return {...state, nodes: updatedNodes, hotKeys: { keysPressed: [] }}
-    } else {
-      return {...state, hotKeys: { keysPressed: updatedHotKeys }}
-    }
-  } else if (action.type === "keyReleased") {
-    const updatedHotKeys = state.hotKeys.keysPressed.slice()
-    updatedHotKeys.splice(updatedHotKeys.findIndex(k => k === action.value), 1)
-    return {...state, hotKeys: { keysPressed: updatedHotKeys }}
+  }
+  if (action.type === 'edgeAdd') {
+    return {...state, edges: addEdge(action.connection, state.edges)}
   } else {
     return state
   }
@@ -133,6 +150,8 @@ const MarkdownNode: FC<NodeProps<NodeData>> = (node: NodeProps) => {
       <Markdown content={isExpanded ? node.data.content : node.data.label} />
       <button onClick={node.data.onEdit}>Edit</button>
       <button onClick={() => setIsExpanded(!isExpanded)}>Toggle</button>
+      <Handle type="source" position={Position.Bottom} id="a" />
+      <Handle type="target" position={Position.Top} id="a" />
     </div>
   )
 }
@@ -157,16 +176,58 @@ const createNode = (onEdit: (id: string) => () => void) => {
 
 Modal.setAppElement('#root');
 
+
+
+interface KeyPressedAction {
+  type: 'keyPressed'
+  value: string
+}
+
+interface KeyReleasedAction {
+  type: 'keyReleased'
+  value: string
+}
+
+interface HotKeysState {
+  keysPressed: string[]
+}
+
+type HotKeyReducerAction = KeyPressedAction | KeyReleasedAction
+
+const hotKeysReducer = (dispatch: (action: ReducerAction) => void): Reducer<HotKeysState, HotKeyReducerAction> => {
+  return (state: HotKeysState, action: HotKeyReducerAction) => {
+    if (action.type === 'keyPressed') {
+      const updatedHotKeys = state.keysPressed.slice()
+      updatedHotKeys.push(action.value)
+      if (eqSet(new Set(updatedHotKeys), new Set(['Alt', 'n']))) {
+        const onEdit = (id: string) => () => dispatch( {type: 'edit', id, isEditing: true})
+        dispatch({type: 'nodeChange', changes: [{type: 'add', item: createNode((onEdit))}]})
+        return { keysPressed: [] }
+      } else {
+        return { keysPressed: updatedHotKeys }
+      }
+    }
+    if (action.type === "keyReleased") {
+      const updatedHotKeys = state.keysPressed.slice()
+      updatedHotKeys.splice(updatedHotKeys.findIndex(k => k === action.value), 1)
+      return { keysPressed: updatedHotKeys }
+    } else {
+      return state
+    }
+  }
+}
+
 function App() {
   const [state, dispatch]: [ReducerState, (action: ReducerAction) => void] = useReducer(graphReducer, {
     nodes: [],
     edges: [],
-    hotKeys: { keysPressed: [] }
   })
+  const [_, dispatchHotKey]: [HotKeysState, (action: KeyPressedAction | KeyReleasedAction) => void] =
+    useReducer(hotKeysReducer(dispatch), {keysPressed: []})
 
   useEffect(() => {
-    const keydown = (e: KeyboardEvent) => dispatch({type: 'keyPressed', value: e.key})
-    const keyup = (e: KeyboardEvent) => dispatch({type: 'keyReleased', value: e.key})
+    const keydown = (e: KeyboardEvent) => dispatchHotKey({type: 'keyPressed', value: e.key})
+    const keyup = (e: KeyboardEvent) => dispatchHotKey({type: 'keyReleased', value: e.key})
     document.addEventListener('keydown', keydown)
     document.addEventListener('keyup', keyup)
     return () => {
@@ -184,8 +245,10 @@ function App() {
         onEdgesChange={(changes) => dispatch({type: 'edgeChange', changes})}
         fitView
         nodeTypes={NODE_TYPES}
-        onKeyDown={e => dispatch({type: 'keyPressed', value: e.key})}
-        onKeyUp={e => dispatch({type: 'keyReleased', value: e.key})}
+        onConnect={connection => dispatch({type: 'edgeAdd', connection})}
+        onEdgeUpdate={(oldEdge, newConnection) => dispatch({type: 'edgeUpdate', oldEdge, newConnection})}
+        onEdgeUpdateStart={() => dispatch({type: 'edgeUpdateStart'})}
+        onEdgeUpdateEnd={(_, edge) => dispatch({type: 'edgeUpdateEnd', edge})}
       >
         <MiniMap/>
         <Controls/>
