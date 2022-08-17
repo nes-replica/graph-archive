@@ -1,4 +1,4 @@
-import React, {FC, Reducer, useReducer, useState} from 'react';
+import React, {FC, Reducer, useEffect, useReducer, useState} from 'react';
 import './App.css';
 import ReactFlow, {
   applyEdgeChanges,
@@ -10,7 +10,8 @@ import ReactFlow, {
 import {Markdown, MDEditor} from "../core/editor/MDEditor";
 import {MDStub} from "./MDStub";
 import Modal from "react-modal";
-
+import {v4 as uuidv4} from 'uuid';
+import {eqSet} from "../core/ComparisonUtil";
 
 interface NodeData {
   label: string
@@ -25,10 +26,15 @@ interface EditorState {
   content: string
 }
 
+interface HotKeysState {
+  keysPressed: string[]
+}
+
 interface ReducerState {
   nodes: Node<NodeData>[]
   edges: Edge<EdgeData>[]
   editor?: EditorState
+  hotKeys: HotKeysState
 }
 
 interface EditAction {
@@ -53,7 +59,17 @@ interface EdgeChangeAction {
   changes: EdgeChange[]
 }
 
-type ReducerAction = EditAction | ContentChangeAction | NodeChangeAction | EdgeChangeAction
+interface KeyPressedAction {
+  type: 'keyPressed'
+  value: string
+}
+
+interface KeyReleasedAction {
+  type: 'keyReleased'
+  value: string
+}
+
+type ReducerAction = EditAction | ContentChangeAction | NodeChangeAction | EdgeChangeAction | KeyPressedAction | KeyReleasedAction
 
 const graphReducer: Reducer<ReducerState, ReducerAction> = (state: ReducerState, action: ReducerAction): ReducerState => {
   if (action.type === 'edit') {
@@ -89,6 +105,21 @@ const graphReducer: Reducer<ReducerState, ReducerAction> = (state: ReducerState,
   } else if (action.type === 'edgeChange') {
     const updatedEdges = applyEdgeChanges(action.changes, state.edges)
     return {...state, edges: updatedEdges}
+  } else if (action.type === 'keyPressed') {
+    const updatedHotKeys = state.hotKeys.keysPressed.slice()
+    updatedHotKeys.push(action.value)
+    console.log(updatedHotKeys)
+    if (eqSet(new Set(updatedHotKeys), new Set(['Alt', 'n']))) {
+      const onEdit = (id: string) => () => graphReducer(state, {type: 'edit', id, isEditing: true})
+      const updatedNodes = applyNodeChanges([{type: 'add', item: createNode((onEdit))}], state.nodes)
+      return {...state, nodes: updatedNodes, hotKeys: { keysPressed: [] }}
+    } else {
+      return {...state, hotKeys: { keysPressed: updatedHotKeys }}
+    }
+  } else if (action.type === "keyReleased") {
+    const updatedHotKeys = state.hotKeys.keysPressed.slice()
+    updatedHotKeys.splice(updatedHotKeys.findIndex(k => k === action.value), 1)
+    return {...state, hotKeys: { keysPressed: updatedHotKeys }}
   } else {
     return state
   }
@@ -110,22 +141,39 @@ const NODE_TYPES = {
   markdown: MarkdownNode,
 }
 
+const createNode = (onEdit: (id: string) => () => void) => {
+  const id = uuidv4()
+  return {
+    id,
+    type: 'markdown',
+    data: {
+      label: "test md node",
+      content: MDStub,
+      onEdit: onEdit(id)
+    },
+    position: {x: 250, y: 25},
+  }
+}
+
 Modal.setAppElement('#root');
 
 function App() {
   const [state, dispatch]: [ReducerState, (action: ReducerAction) => void] = useReducer(graphReducer, {
-    nodes: [{
-      id: '1',
-      type: 'markdown',
-      data: {
-        label: "test md node",
-        content: MDStub,
-        onEdit: () => {dispatch({type: 'edit', id: '1', isEditing: true})}
-      },
-      position: {x: 250, y: 25},
-    }],
+    nodes: [],
     edges: [],
+    hotKeys: { keysPressed: [] }
   })
+
+  useEffect(() => {
+    const keydown = (e: KeyboardEvent) => dispatch({type: 'keyPressed', value: e.key})
+    const keyup = (e: KeyboardEvent) => dispatch({type: 'keyReleased', value: e.key})
+    document.addEventListener('keydown', keydown)
+    document.addEventListener('keyup', keyup)
+    return () => {
+      document.removeEventListener('keydown', keydown)
+      document.removeEventListener('keyup', keyup)
+    }
+  }, [])
 
   return (
     <>
@@ -136,6 +184,8 @@ function App() {
         onEdgesChange={(changes) => dispatch({type: 'edgeChange', changes})}
         fitView
         nodeTypes={NODE_TYPES}
+        onKeyDown={e => dispatch({type: 'keyPressed', value: e.key})}
+        onKeyUp={e => dispatch({type: 'keyReleased', value: e.key})}
       >
         <MiniMap/>
         <Controls/>
